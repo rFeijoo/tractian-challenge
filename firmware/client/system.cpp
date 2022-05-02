@@ -4,14 +4,14 @@
 /*        system.cpp                                   Author  : Rafael Feijó Leonardo        */
 /*                                                     Email   : goldcard99@hotmail.com       */
 /*                                                     Address : DF, BRAZIL, 70670-403        */
-/*        Created: 2022/04/30 16:47:51 by rFeijo                                              */
-/*        Updated: 2022/04/30 19:25:25 by rFeijo                                              */
+/*        Created: 2022/04/30 21:32:04 by rFeijo                                              */
+/*        Updated: 2022/05/01 15:34:54 by rFeijo                                              */
 /*                                                                       All rights reserved  */
 /**********************************************************************************************/
 
 #include "system.h"
 
-RH_NRF24 transceiver;
+RH_NRF24 transceiver(2, 4);
 
 /** 
  * @brief Inicializa o Serial Console, quando com o modo DEBUG ativado.
@@ -58,6 +58,16 @@ void tractian_system_t::toggle_digital_output(uint8_t pin) {
 }
 
 /** 
+ * @brief Inicializa a memória flash do uC.
+ */
+bool tractian_system_t::mount_spiffs(void) {
+  if (!LittleFS.begin())
+    return (false);
+
+  return (true);
+}
+
+/** 
  * @brief Inicializa o módulo nRF24L01+.
  * 
  * @param ch Canal do módulo (por padrão, inicializado no canal 2).
@@ -91,44 +101,76 @@ bool tractian_system_t::init_rf_transceiver(uint8_t ch, RH_NRF24::DataRate d_rat
   return (status);
 }
 
-/*
- * @brief Verifica se há alguma nova mensagem recebida pelo módulo nRF24L01+.
- * 
- * @return:
- *    - true:  Nova mensagem recebida.
- *    - false: Nenhum nova mensagem recebida.
+/* 
+ *  @brief Envia uma mesagem para a rede RF criada.
  */
-bool tractian_system_t::check_for_new_messages(void) {
-  if (transceiver.available()) {
-    serial_print("RF - New message received");
-    return (true);
+void tractian_system_t::send_message(void) {
+  File fp = LittleFS.open(SPIFFS_FILE_NAME, SPIFFS_OP_MODE);
+
+  if (!fp) {
+    serial_print("SPIFFS - Failed to open file");
+    
+    return;
   }
 
-  return (false);
+  uint8_t msg[RH_NRF24_MAX_MESSAGE_LEN], index = 0;
+  while (fp.available()) {
+    msg[index++] = (uint8_t)fp.read();
+
+    if (index == (RH_NRF24_MAX_MESSAGE_LEN - 1)) {
+      msg[index] = (uint8_t)'\0';
+
+      serial_print("Message size: " + String(get_sizeof_msg(msg)));
+      serial_print((char *)msg);
+      
+      transceiver.send(msg, get_sizeof_msg(msg));
+      transceiver.waitPacketSent();
+      
+      index = 0;
+    }
+  }
+
+  if (index > 0) {
+    msg[index] = (uint8_t)'\0';
+    
+    transceiver.send(msg, get_sizeof_msg(msg));
+    transceiver.waitPacketSent();
+  }
+
+  fp.close();
+
+  wait_for_ack();
 }
 
 /* 
- *  @brief Processa novas mensagens recebidas pelo módulo nRF24L01+.
- *  
- *  @return Mensagem recebida.
+ *  @brief Espera um retorno (ack) do servidor.
  */
-String tractian_system_t::process_new_msg(void) {
+void tractian_system_t::wait_for_ack(void) {
   uint8_t buf[RH_NRF24_MAX_MESSAGE_LEN];
   uint8_t len = sizeof(buf);
 
-  if (transceiver.recv(buf, &len)) {
-    serial_print("RF - Message: " + String((char *)buf));
-    
-    uint8_t ack[] = "SERVER - Message received [ack]";
-    transceiver.send(ack, sizeof(ack));
-    serial_print("RF - ACK sent");
-
-    return ((char *)buf);
+  if (transceiver.waitAvailableTimeout(NRF24L01_DELAY)) {
+    if (transceiver.recv(buf, &len)) {
+      serial_print("RF - New message received");
+      serial_print("RF - Message: " + String((char *)buf));
+    }
+    else
+      serial_print("RF - Failed to retrieve message");
   }
   else
-    serial_print("RF - Failed to retrieve message");
+    serial_print("RF - Failed to sync with server (is it running?)");
+}
 
-  return ("");
+uint8_t tractian_system_t::get_sizeof_msg(uint8_t *ptr) {
+  uint8_t length = 1;
+
+  if (!ptr)
+    return (0);
+
+  while (ptr[length] != '\0')
+    length++;
+
+  return (length);
 }
 
 /** 
